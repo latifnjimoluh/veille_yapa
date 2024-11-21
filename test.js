@@ -1,3 +1,5 @@
+
+
 import express from 'express';
 import axios from 'axios';
 import dotenv from 'dotenv';
@@ -30,7 +32,9 @@ const transporter = nodemailer.createTransport({
     }
 });
 
+
 app.use(express.json());
+
 
 
 // Route pour lister les bases de données
@@ -133,6 +137,25 @@ app.get('/api/databases/:id', async (req, res) => {
     }
 });
 
+// Fonction pour gérer les tentatives de requêtes
+const retryRequest = async (func, retries = 5, delay = 5000) => {
+    let attempt = 0;
+    while (attempt < retries) {
+        try {
+            return await func();
+        } catch (error) {
+            if (attempt < retries - 1) {
+                console.log(`Retrying... (${attempt + 1})`);
+                await new Promise(resolve => setTimeout(resolve, delay)); // Attendre avant de réessayer
+            } else {
+                throw error;
+            }
+        }
+        attempt++;
+    }
+};
+
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 app.post('/api/gemini-techno/:notionDatabaseId', async (req, res) => {
     const { notionDatabaseId } = req.params;
@@ -183,119 +206,117 @@ app.post('/api/gemini-techno/:notionDatabaseId', async (req, res) => {
             };
         });
 
-// Étape 2 : Générer et envoyer le prompt à Gemini pour chaque donnée séparément
-for (const data of notionData) {
-    const prompt = `
-        Voici les informations sur mon projet :
-        YAPA est une solution d'agrégation de paiements accessible à la fois en tant qu'application web et mobile. 
-        Voici les informations sur un concurrent :
+        // Étape 2 : Générer et envoyer le prompt à Gemini pour chaque donnée séparément
+        for (const data of notionData) {
+            const prompt = `
+                Voici les informations sur mon projet :
+                YAPA est une solution d'agrégation de paiements accessible à la fois en tant qu'application web et mobile. 
+                Voici les informations sur un concurrent :
 
-        URL : ${data.url}
-        Titre : ${data.titre}
-        Contenu : ${data.content}
-        Date de publication : ${data.date}
+                URL : ${data.url}
+                Titre : ${data.titre}
+                Contenu : ${data.content}
+                Date de publication : ${data.date}
 
-        Recherche le nom du concurrent à partir de ces informations et donne uniquement le nom.
-        Tu vas uniquement dire Le nom est: 'le_nom'
-    `;
+                Recherche le nom du concurrent à partir de ces informations et donne uniquement le nom.
+                Tu vas uniquement dire Le nom est: 'le_nom'
+            `;
 
-    let generatedText = null;
-    try {
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-        const geminiResponse = await model.generateContent(prompt);
-        const responseAI = await geminiResponse.response;
-        generatedText = await responseAI.text();
-    } catch (geminiError) {
-        console.error("Erreur Gemini :", geminiError.message || geminiError);
-    }
+            let generatedText = null;
+            try {
+                const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+                const geminiResponse = await model.generateContent(prompt);
+                const responseAI = await geminiResponse.response;
+                generatedText = await responseAI.text();
+            } catch (geminiError) {
+                console.error("Erreur Gemini :", geminiError.message || geminiError);
+            }
 
-    // Extraction du nom après "Le nom est:"
-    let extractedName = null;
-    if (generatedText) {
-        const match = generatedText.trim().match(/Le nom est:\s*(.*)/);
-        if (match && match[1]) {
-            extractedName = match[1].trim(); // Le nom est extrait ici
-        }
-    }
+            // Étape 1 : Extraire uniquement le nom du concurrent après "Le nom est: "
+            const regex = /Le nom est : (.+)/; // Recherche du texte après "Le nom est : "
+            const match = generatedText?.trim().match(regex);
 
-    // Mise à jour de Notion avec le nom du concurrent
-    if (extractedName) {
-        try {
-            await axios.patch(
-                `https://api.notion.com/v1/pages/${data.id}`,
-                {
-                    properties: {
-                        "Nom du concurrent": {
-                            title: [
-                                {
-                                    text: {
-                                        content: extractedName // Enregistrer le nom extrait
-                                    }
+            let competitorName = null;
+            if (match && match[1]) {
+                competitorName = match[1].trim(); // Le nom du concurrent
+            } else {
+                console.log("Nom du concurrent non trouvé dans la réponse Gemini.");
+            }
+
+            // Mise à jour de Notion avec le nom extrait du texte généré
+            if (competitorName) {
+                try {
+                    await axios.patch(
+                        `https://api.notion.com/v1/pages/${data.id}`,
+                        {
+                            properties: {
+                                "Nom du concurrent": {
+                                    title: [
+                                        {
+                                            text: {
+                                                content: competitorName // Enregistrer le nom extrait
+                                            }
+                                        }
+                                    ]
                                 }
-                            ]
+                            }
+                        },
+                        {
+                            headers: {
+                                "Authorization": `Bearer ${notionToken}`,
+                                "Notion-Version": notionVersion
+                            }
                         }
-                    }
-                },
-                {
-                    headers: {
-                        "Authorization": `Bearer ${notionToken}`,
-                        "Notion-Version": notionVersion
-                    }
+                    );
+                } catch (updateError) {
+                    console.error("Erreur lors de la mise à jour de Notion :", updateError.message || updateError);
                 }
-            );
-        } catch (updateError) {
-            console.error("Erreur lors de la mise à jour de Notion :", updateError.message || updateError);
+            }
+            console.log("Le nom est ", competitorName);
+            // Étape 3 : Préparer et envoyer l'email avec les données et le prompt
+            const emailContent = `
+                <html>
+                    <body>
+                        <h2 style="color:#2C3E50;">Rapport de Veille Technologique</h2>
+                        <p><strong>Bonjour,</strong></p>
+                        <p>Voici les données issues de votre base Notion :</p>
+                        <ul>
+                            <li>
+                                <h3 style="color:#2980B9;"><strong>${data.titre}</strong></h3>
+                                <p><strong>Identifiant:</strong> ${data.identifiant}</p>
+                                <p><strong>URL:</strong> <a href="${data.url}" target="_blank">${data.url}</a></p>
+                                <p><strong>Date de publication:</strong> ${data.date}</p>
+                                <p><strong>Contenu:</strong> ${data.content}</p>
+                            </li>
+                        </ul>
+                        <hr>
+                        <p><strong>Prompt généré :</strong></p>
+                        <pre>${prompt}</pre>
+                        <hr>
+                        <p><strong>Rapport généré par Gemini :</strong></p>
+                        <pre>${competitorName || 'Pas de nom généré par Gemini'}</pre>
+                        <p><strong>Bonne lecture et à bientôt !</strong></p>
+                    </body>
+                </html>
+            `;
+
+            const mailOptions = {
+                from: emailUser,
+                to: recipientEmail,
+                subject: 'Rapport de Veille Technologique et Prompt',
+                html: emailContent
+            };
+
+            transporter.sendMail(mailOptions, (error, info) => {
+                if (error) {
+                    console.error("Erreur lors de l'envoi de l'email :", error);
+                } else {
+                    console.log("Email envoyé avec succès :", info.response);
+                }
+            });
         }
-    }
 
-    console.log("Le nom extrait est :", extractedName);
-
-    // Étape 3 : Préparer et envoyer l'email avec les données et le prompt
-    const emailContent = `
-        <html>
-            <body>
-                <h2 style="color:#2C3E50;">Rapport de Veille Technologique</h2>
-                <p><strong>Bonjour,</strong></p>
-                <p>Voici les données issues de votre base Notion :</p>
-                <ul>
-                    <li>
-                        <h3 style="color:#2980B9;"><strong>${data.titre}</strong></h3>
-                        <p><strong>Identifiant:</strong> ${data.identifiant}</p>
-                        <p><strong>URL:</strong> <a href="${data.url}" target="_blank">${data.url}</a></p>
-                        <p><strong>Date de publication:</strong> ${data.date}</p>
-                        <p><strong>Contenu:</strong> ${data.content}</p>
-                    </li>
-                </ul>
-                <hr>
-                <p><strong>Prompt généré :</strong></p>
-                <pre>${prompt}</pre>
-                <hr>
-                <p><strong>Rapport généré par Gemini :</strong></p>
-                <pre>${generatedText || 'Pas de données générées par Gemini'}</pre>
-                <p><strong>Nom extrait du concurrent :</strong> ${extractedName || 'Nom non extrait'}</p>
-                <p><strong>Bonne lecture et à bientôt !</strong></p>
-            </body>
-        </html>
-    `;
-
-    const mailOptions = {
-        from: emailUser,
-        to: recipientEmail,
-        subject: 'Rapport de Veille Technologique et Prompt',
-        html: emailContent
-    };
-
-    transporter.sendMail(mailOptions, (error, info) => {
-        if (error) {
-            console.error("Erreur lors de l'envoi de l'email :", error);
-        } else {
-            console.log("Email envoyé avec succès :", info.response);
-        }
-    });
-}
-
-res.status(200).json({ success: true, message: "Les rapports ont été envoyés par email avec succès." });
-
+        res.status(200).json({ success: true, message: "Les rapports ont été envoyés par email avec succès." });
 
     } catch (error) {
         console.error("Erreur :", error.message || error);
@@ -306,7 +327,6 @@ res.status(200).json({ success: true, message: "Les rapports ont été envoyés 
         });
     }
 });
-
 
 
 
